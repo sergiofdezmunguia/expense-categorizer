@@ -110,6 +110,17 @@ def score(name: str, model, X_tr, y_tr, X_te, y_te, split: str) -> Score:
     )
 
 
+def _pool(name: str, parts: list[Score]) -> Score:
+    """Agrega los pliegues ponderando por movimientos; la precisión cubierta, por cubiertos."""
+    n = sum(p.n_test for p in parts)
+    avg = lambda f: sum(getattr(p, f) * p.n_test for p in parts) / n
+    covered = [(p.coverage_at_target * p.n_test, p.precision_covered) for p in parts]
+    total = sum(c for c, _ in covered)
+    precision = sum(c * pr for c, pr in covered if c) / total if total else float("nan")
+    return Score(name, "comercios nuevos", n, avg("accuracy"), avg("macro_f1"),
+                 avg("coverage_at_target"), precision)  # fmt: skip
+
+
 def temporal_split(df: pd.DataFrame, test_frac: float = 0.2):
     df = df.sort_values("booking_date", kind="stable")
     cut = df["booking_date"].iloc[int(len(df) * (1 - test_frac))]
@@ -133,17 +144,7 @@ def run(df: pd.DataFrame, folds: int = 5) -> list[Score]:
         ):
             parts.append(score(name, cls(), df.iloc[a], df["category"].iloc[a], df.iloc[b],
                                df["category"].iloc[b], f"comercios nuevos #{i}"))  # fmt: skip
-        n = sum(s.n_test for s in parts)
-        w = lambda f: (
-            sum(
-                getattr(s, f) * s.n_test
-                for s in parts
-                if getattr(s, f) == getattr(s, f)
-            )
-            / n
-        )  # noqa: E731
-        out.append(Score(name, "comercios nuevos", n, w("accuracy"), w("macro_f1"),
-                         w("coverage_at_target"), w("precision_covered")))  # fmt: skip
+        out.append(_pool(name, parts))
     return out
 
 
@@ -152,11 +153,15 @@ def report(scores: list[Score], title: str, df: pd.DataFrame) -> str:
     lines = [
         f"# {title}",
         "",
-        f"{len(df)} movimientos etiquetados, {df['category'].nunique()} categorías, "
-        f"{df['description'].map(merchant_key).nunique()} comercios (clave aproximada).",
+        (
+            f"{len(df)} movimientos etiquetados, {df['category'].nunique()} categorías, "
+            f"{df['description'].map(merchant_key).nunique()} comercios (clave aproximada)."
+        ),
         "",
-        f"Cobertura = parte que se categoriza sola con un umbral elegido para ≥ {TARGET_PRECISION:.0%} "
-        "de precisión en validación interna; «precisión cubierta» es la que se obtiene de verdad en la prueba.",
+        (
+            f"Cobertura = parte que se categoriza sola con un umbral elegido para ≥ {TARGET_PRECISION:.0%} "
+            "de precisión en validación interna; «precisión cubierta» es la que se obtiene de verdad en la prueba."
+        ),
         "",
         "| División | Modelo | Accuracy | F1 macro | Cobertura | Precisión cubierta |",
         "|---|---|---|---|---|---|",

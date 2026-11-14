@@ -17,7 +17,7 @@ Datos reales: 1.542 movimientos etiquetados, 35 categorías, jul-2025 → nov-20
 | temporal | memoria de comercios (≈ reglas) | 32 % | 0,23 | 32 % | 100 % |
 | temporal | **texto (TF-IDF + logística)** | **88 %** | **0,80** | **98 %** | 89 % |
 | comercios nuevos | memoria de comercios (≈ reglas) | 1 % | 0,00 | 0 % | — |
-| comercios nuevos | **texto (TF-IDF + logística)** | **66 %** | **0,59** | **29 %** | **94 %** |
+| comercios nuevos | **texto (TF-IDF + logística)** | **66 %** | **0,59** | **29 %** | **90 %** |
 
 Cómo leerlo:
 
@@ -25,7 +25,7 @@ Cómo leerlo:
   categoriza casi todo lo que llega con un 88 % de aciertos.
 - **Comercios nuevos** (GroupKFold: ningún comercio de la prueba está en el entrenamiento) es
   donde las reglas no llegan. El modelo acierta 2 de cada 3 y, sobre todo, **sabe cuándo está
-  seguro**: el 29 % que se atreve a categorizar solo lo acierta el 94 % de las veces.
+  seguro**: el 29 % que se atreve a categorizar solo lo acierta el 90 % de las veces, justo el objetivo fijado.
 - La memoria de comercios es casi perfecta cuando responde (100 %), pero responde poco: solo
   recuerda comercios con una categoría consistente (pureza ≥ 90 %). Recordar claves ambiguas,
   como transferencias, bajaba el híbrido del 88 % al 62 %.

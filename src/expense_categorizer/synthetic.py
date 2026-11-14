@@ -74,7 +74,7 @@ def generate(n: int = 2000, seed: int = 7) -> pd.DataFrame:
             {
                 "booking_date": dates[rng.integers(len(dates))].date().isoformat(),
                 "description": desc,
-                "amount_cents": int(round(amount * 100)),
+                "amount_cents": round(amount * 100),
                 "account_kind": "broker"
                 if cat in ("intereses", "inversion")
                 else "bank",
