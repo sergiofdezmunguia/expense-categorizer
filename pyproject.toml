@@ -1,0 +1,25 @@
+[project]
+name = "expense-categorizer"
+version = "0.1.0"
+description = "Categorizador de gastos bancarios con ML que generaliza a comercios nunca vistos"
+readme = "README.md"
+authors = [
+    { name = "Sergio Fernández" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.4.6",
+    "pandas>=3.1.1",
+    "scikit-learn>=1.9.1",
+    "threadpoolctl>=3.8.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.5",
+]

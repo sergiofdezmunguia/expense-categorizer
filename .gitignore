@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+# Datos reales: nunca al repo
+data/
+*.db
+*.parquet
+*.csv
+!examples/*.csv
+results/real/
