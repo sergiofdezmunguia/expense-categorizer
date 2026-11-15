@@ -153,3 +153,26 @@ def test_tuned_c_picks_from_grid_using_only_training_rows():
     m = TunedC(TextModel(), grid=(0.01, 10.0)).fit(df, df["category"])
     assert m.C_ == 10.0  # C muy pequeña infraajusta en validación interna
     assert m.predict(df.iloc[:3]).shape == (3,)
+
+
+@__import__("pytest").mark.skipif(not emb.available(), reason="sin extra embeddings")
+def test_use_device_forces_cpu_and_restores():
+    before = emb.device()
+    with emb.use_device("cpu"):
+        assert emb.device() == "cpu"
+        v = emb.encode(emb.E5_SMALL, ["farmacia lopez"])
+    assert emb.device() == before and v.shape == (1, 384)
+
+
+def test_report_writes_one_cost_table_per_device():
+    df = generate(n=300)
+    scores = ev.run(df, folds=3, models={"texto (TF-IDF + logística)": TextModel})
+    row = {
+        "model": "m",
+        "fit_s": 1.0,
+        "batch_ms": 0.1,
+        "single_ms": 2.0,
+        "size_mb": 0.3,
+    }
+    text = ev.report(scores, "t", df, [("cuda", [row]), ("cpu, 1 hilo(s)", [row])])
+    assert "dispositivo: cuda)" in text and "dispositivo: cpu, 1 hilo(s))" in text

@@ -200,6 +200,7 @@ def paired_diff(p: Preds, base: Preds, n: int = 1000, seed: int = 0) -> tuple:
 
 
 RC_LEVELS = (0.25, 0.5, 0.75)
+CPU_COST_ROWS = 100
 
 
 def risk_coverage(p: Preds) -> dict:
@@ -249,13 +250,18 @@ def run(df: pd.DataFrame, folds: int = 5, models: dict | None = None,
     return out
 
 
-def costs(df: pd.DataFrame, models: dict, single: int = 30) -> list[dict]:
+def costs(df: pd.DataFrame, models: dict, single: int = 30,
+          max_batch: int | None = None) -> list[dict]:  # fmt: skip
     """Coste de cada modelo en la división temporal, **sin caché de embeddings** (si no, la
     latencia sería falsa): tiempo de ajuste, ms por movimiento en lote, ms de un movimiento
-    suelto (mediana) y tamaño (modelo serializado + pesos del codificador congelado)."""
+    suelto (mediana) y tamaño (modelo serializado + pesos del codificador congelado).
+    `max_batch` limita las filas del lote (en CPU, el LLM tardaría minutos con toda la prueba).
+    El dispositivo es el de `embeddings.device()`; se fuerza con `embeddings.use_device`."""
     df = df.dropna(subset=["category"]).reset_index(drop=True)
     df["category"] = collapse_rare(df["category"])
     tr, te = temporal_split(df)
+    if max_batch:
+        te = te.iloc[:max_batch]
     rows = []
     for name, cls in models.items():
         with embeddings.no_cache():
@@ -289,7 +295,8 @@ def _ci(ci) -> str:
 
 
 def report(scores: list[Score], title: str, df: pd.DataFrame,
-           cost_rows: list[dict] | None = None, device: str | None = None) -> str:  # fmt: skip
+           cost_tables: list[tuple[str, list[dict]]] = ()) -> str:  # fmt: skip
+    """`cost_tables`: [(descripción del dispositivo, filas de `costs`)], una tabla por cada uno."""
     lines = [
         f"# {title}",
         "",
@@ -346,10 +353,10 @@ def report(scores: list[Score], title: str, df: pd.DataFrame,
         rc = risk_coverage(s.preds)
         cells = " | ".join(f"{rc[lvl]:.0%}" for lvl in RC_LEVELS)
         lines.append(f"| {s.split} | {s.model} | {cells} | {rc['aurc']:.3f} |")
-    if cost_rows:
+    for device, cost_rows in cost_tables:
         lines += [
             "",
-            f"## Coste (división temporal, sin caché, dispositivo: {device or 'cpu'})",
+            f"## Coste (división temporal, sin caché, dispositivo: {device})",
             "",
             "| Modelo | Ajuste (s) | ms/movimiento en lote | ms de un movimiento suelto | Tamaño (MB) |",
             "|---|---|---|---|---|",
@@ -377,6 +384,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--bootstrap", type=int, default=1000, help="remuestreos; 0 = sin IC"
     )
+    ap.add_argument("--no-cpu-cost", action="store_true",
+                    help="con GPU, no medir también el coste en CPU")  # fmt: skip
     args = ap.parse_args(argv)
     if args.source == "synthetic":
         from expense_categorizer.synthetic import generate
@@ -405,9 +414,14 @@ def main(argv: list[str] | None = None) -> int:
         models |= llm_models()
     scores = run(df, models=models, n_boot=args.bootstrap)
     cost_models = {k: v for k, v in models.items() if k != "mayoritaria"}
-    cost_rows = costs(df, cost_models)
-    text = report(scores, title, df.dropna(subset=["category"]), cost_rows,
-                  embeddings.device() if use_emb else "cpu")  # fmt: skip
+    dev = embeddings.device() if use_emb else "cpu"
+    cost_tables = [(dev, costs(df, cost_models))]
+    if use_emb and dev != "cpu" and not args.no_cpu_cost:
+        with embeddings.use_device("cpu"):
+            cpu_rows = costs(df, cost_models, max_batch=CPU_COST_ROWS)
+        label = f"cpu, {embeddings.TORCH_THREADS} hilo(s), lote de {CPU_COST_ROWS} movimientos"
+        cost_tables.append((label, cpu_rows))
+    text = report(scores, title, df.dropna(subset=["category"]), cost_tables)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
     if args.source == "synthetic":

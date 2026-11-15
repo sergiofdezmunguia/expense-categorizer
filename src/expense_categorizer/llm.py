@@ -24,7 +24,7 @@ SYSTEM = (
     "Responde solo con el nombre exacto de una categoría de la lista."
 )
 
-_models: dict[str, tuple] = {}
+_models: dict[tuple[str, str], tuple] = {}
 _cache: dict[tuple[str, str, str], float] = {}
 
 
@@ -37,17 +37,17 @@ def available() -> bool:
 
 
 def _load(name: str):
-    if name not in _models:
+    dev = embeddings.device()
+    if (name, dev) not in _models:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         torch.set_num_threads(embeddings.TORCH_THREADS)
-        dev = embeddings.device()
         tok = AutoTokenizer.from_pretrained(name)
         dtype = torch.float16 if dev == "cuda" else torch.float32
         model = AutoModelForCausalLM.from_pretrained(name, dtype=dtype).to(dev).eval()
-        _models[name] = (tok, model, dev)
-    return _models[name]
+        _models[(name, dev)] = (tok, model, dev)
+    return _models[(name, dev)]
 
 
 def _prompt(tok, labels, text: str, amount: float, kind: str) -> str:

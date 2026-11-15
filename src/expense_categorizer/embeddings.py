@@ -30,9 +30,10 @@ _PREFIX = {E5_SMALL: "query: "}
 # Pocos hilos: en WSL, con todos los núcleos, BLAS/OpenMP se pisan (ver TextModel).
 TORCH_THREADS = int(os.environ.get("EC_TORCH_THREADS", "1"))
 
-_encoders: dict[str, object] = {}
+_encoders: dict[tuple[str, str], object] = {}
 _cache: dict[tuple[str, str], np.ndarray] = {}
 _use_cache = True
+_forced_device: str | None = None
 
 
 def available() -> bool:
@@ -44,19 +45,34 @@ def available() -> bool:
 
 
 def device() -> str:
+    if _forced_device:
+        return _forced_device
     import torch
 
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
+@contextmanager
+def use_device(dev: str):
+    """Fuerza el dispositivo (p. ej. «cpu» para medir la latencia sin GPU). Los codificadores se
+    guardan por (modelo, dispositivo), así que no se mezclan."""
+    global _forced_device
+    old, _forced_device = _forced_device, dev
+    try:
+        yield
+    finally:
+        _forced_device = old
+
+
 def _encoder(name: str):
-    if name not in _encoders:
+    key = (name, device())
+    if key not in _encoders:
         import torch
         from sentence_transformers import SentenceTransformer
 
         torch.set_num_threads(TORCH_THREADS)
-        _encoders[name] = SentenceTransformer(name, device=device())
-    return _encoders[name]
+        _encoders[key] = SentenceTransformer(name, device=key[1])
+    return _encoders[key]
 
 
 def encoder_bytes(name: str) -> int:
