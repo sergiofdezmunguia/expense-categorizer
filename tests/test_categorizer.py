@@ -1,5 +1,8 @@
+import os
+
 import numpy as np
 import pandas as pd
+import pytest
 from sklearn.model_selection import GroupKFold
 
 from expense_categorizer import evaluate as ev
@@ -113,10 +116,10 @@ def test_pooled_folds_keep_test_rows_and_threshold_from_train_only(monkeypatch):
     assert seen and max(seen) < len(df)
 
 
-emb = __import__("pytest").importorskip("expense_categorizer.embeddings")
+emb = pytest.importorskip("expense_categorizer.embeddings")
 
 
-@__import__("pytest").mark.skipif(not emb.available(), reason="sin extra embeddings")
+@pytest.mark.skipif(not emb.available(), reason="sin extra embeddings")
 def test_embedding_models_generalize_and_cache():
     from expense_categorizer.models import EmbeddingModel
 
@@ -133,8 +136,8 @@ def test_embedding_models_generalize_and_cache():
     assert abs(np.linalg.norm(a[0]) - 1) < 1e-4
 
 
-@__import__("pytest").mark.skipif(
-    __import__("os").environ.get("EC_TEST_LLM") != "1",
+@pytest.mark.skipif(
+    os.environ.get("EC_TEST_LLM") != "1",
     reason="descarga ~3 GB; EC_TEST_LLM=1",
 )
 def test_llm_zero_shot_returns_distribution_over_training_labels():
@@ -155,7 +158,7 @@ def test_tuned_c_picks_from_grid_using_only_training_rows():
     assert m.predict(df.iloc[:3]).shape == (3,)
 
 
-@__import__("pytest").mark.skipif(not emb.available(), reason="sin extra embeddings")
+@pytest.mark.skipif(not emb.available(), reason="sin extra embeddings")
 def test_use_device_forces_cpu_and_restores():
     before = emb.device()
     with emb.use_device("cpu"):
