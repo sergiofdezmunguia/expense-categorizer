@@ -1,16 +1,38 @@
 # Categorizador de gastos que generaliza a comercios nuevos
 
-Las reglas («MERCADONA → supermercado») resuelven bien lo conocido y nada de lo nuevo. Este
-proyecto mide, con una evaluación honesta, **cuánto se puede automatizar con un modelo pequeño
-y explicable** y **cuándo debe abstenerse** y dejarlo para revisión humana.
+> **In English.** Rules ("MERCADONA → groceries") handle known merchants and nothing else. This
+> project measures how much of a personal expense categorisation can be automated with a small,
+> explainable model, and when it should abstain. The key evaluation is on **merchants never seen in
+> training** (GroupKFold by merchant), with an abstention threshold chosen without touching the test
+> set and merchant-level bootstrap CIs. On 1,542 real transactions (35 categories), a
+> well-regularised **TF-IDF + logistic regression** gets 70 % accuracy on new merchants and
+> auto-categorises 41 % of them at 98 % precision. **Frozen multilingual embeddings (e5-small,
+> MiniLM) and a local zero-shot LLM (Qwen2.5-1.5B) do not beat it**: the apparent gain of TF-IDF +
+> e5 came from tuning the regularisation, not from the embedding. Only code, synthetic data and
+> aggregate metrics are published.
 
-Lo uso con mis movimientos reales de Santander y Trade Republic, que viven en local en
-[Personal OS](#privacidad). Este repo solo contiene código, datos **sintéticos** y métricas
-agregadas.
+## En 30 segundos
+
+- **Problema.** Categorizar movimientos bancarios. Las reglas aciertan lo conocido; lo difícil es
+  el comercio que aparece por primera vez, y saber cuándo no fiarse del modelo.
+- **Qué hice.** Dos divisiones de evaluación (temporal y por comercios nuevos), abstención con un
+  umbral elegido en validación interna, bootstrap por comercio y, en v2, una comparación declarada
+  de antemano contra embeddings y un LLM local.
+- **Resultado.** En comercios nuevos, TF-IDF + logística con C elegido por validación interna:
+  **70 % de accuracy** (IC 95 % 56–89 %) y **41 % categorizado solo con un 98 % de precisión**.
+  Las reglas, en esa división, aciertan el 1 %.
+- **Lo interesante es el negativo.** Los embeddings congelados no aportan sobre un TF-IDF bien
+  regularizado, y mi primer intento con embeddings (32 %) era peor por un fallo de método
+  (C fijo) que corregí y dejé documentado. El LLM zero-shot se queda en el 30 % y tarda unos
+  11 s por movimiento en CPU frente a 7 ms.
+
+Lo uso con mis propios movimientos bancarios, que viven en local en un sistema privado de finanzas
+personales (Personal OS). Este repo solo contiene código, datos **sintéticos** y métricas
+agregadas ([privacidad](#privacidad)).
 
 ## Resultado (v1)
 
-Datos reales: 1.542 movimientos etiquetados, 35 categorías, jul-2025 → nov-2026.
+Datos reales: 1.542 movimientos etiquetados, 35 categorías, 182 comercios, jul-2025 → nov-2026.
 
 | División | Modelo | Accuracy | F1 macro | Cobertura (umbral ≥ 90 %) | Precisión cubierta |
 |---|---|---|---|---|---|
@@ -66,6 +88,9 @@ Conclusiones:
   mejor, pero lejos. El informe conserva ambas cifras (`--fixed-c`).
 - **Lo que sí sale de v2:** TF-IDF con C interno es la nueva referencia. Categoriza solo el
   41 % de los movimientos de comercios nuevos con un 98 % de precisión (antes, 29 % con un 90 %).
+  Con 182 comercios, los intervalos por comercio son anchos: accuracy 56–89 %, cobertura 26–63 %
+  y precisión cubierta 94–100 % (IC 95 %), y la mejora frente a v1 (+3,6 puntos) no es
+  concluyente (−0,7 a +5,9).
 - **Zero-shot, ni con LLM.** Sin ejemplos, nombres de categoría como `otros-gastos` o mis
   categorías propias no se adivinan: 30 % con un LLM de 1,5 B, a 80 ms por movimiento en GPU y
   ~11 s en CPU.
@@ -102,13 +127,16 @@ Informe sintético completo, con curvas riesgo-cobertura, en
   división que importa es la de comercios nuevos: ahí el modelo no puede limitarse a copiar
   las reglas.
 
-## Uso
+## Reproducir
+
+Con datos sintéticos se reproduce todo sin acceso a nada privado; `--source personal-os` solo
+funciona en mi PC, porque lee mi base local en modo solo lectura.
 
 ```bash
 uv sync
 uv run python -m expense_categorizer.evaluate --source synthetic     # v1 (sin el extra)
 uv run python -m expense_categorizer.evaluate --source personal-os   # mis datos, en local
-uv run pytest
+uv run pytest                                                         # 14 tests, sin red
 
 # v2: embeddings (descarga ~0,5 GB por codificador a ~/.cache/huggingface)
 uv sync --extra embeddings
