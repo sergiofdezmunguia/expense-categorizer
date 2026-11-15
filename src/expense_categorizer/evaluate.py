@@ -9,14 +9,19 @@ Además de accuracy y F1 macro, se mide la **cobertura con precisión objetivo**
 movimientos se puede categorizar sola con al menos un 90 % de aciertos, dejando el resto para
 revisión. El umbral se elige con validación cruzada dentro del entrenamiento.
 
+v2 añade intervalos por bootstrap de comercios, Δ pareado frente a TF-IDF, curva
+riesgo-cobertura y coste (GPU y CPU).
+
     uv run python -m expense_categorizer.evaluate --source synthetic
     uv run python -m expense_categorizer.evaluate --source personal-os   # datos reales, local
+    uv run --extra embeddings python -m expense_categorizer.evaluate --fixed-c --llm  # todo
 """
 
 from __future__ import annotations
 
 import argparse
 import pickle
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -201,6 +206,11 @@ def paired_diff(p: Preds, base: Preds, n: int = 1000, seed: int = 0) -> tuple:
 
 RC_LEVELS = (0.25, 0.5, 0.75)
 CPU_COST_ROWS = 100
+SLOW_COST_ROWS = 10  # el LLM en CPU: segundos por movimiento
+
+
+def _log(msg: str) -> None:
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", file=sys.stderr, flush=True)
 
 
 def risk_coverage(p: Preds) -> dict:
@@ -230,12 +240,14 @@ def run(df: pd.DataFrame, folds: int = 5, models: dict | None = None,
     out: list[Score] = []
     tr, te = temporal_split(df)
     for name, cls in models.items():
+        _log(f"temporal: {name}")
         out.append(
             score(name, cls(), tr, tr["category"], te, te["category"], "temporal")
         )
     groups = df["description"].map(merchant_key)
     splits = list(GroupKFold(n_splits=folds).split(df, df["category"], groups))
     for name, cls in models.items():
+        _log(f"comercios nuevos: {name}")
         parts = [predict_split(cls(), df.iloc[a], df["category"].iloc[a], df.iloc[b],
                                df["category"].iloc[b], "comercios nuevos") for a, b in splits]  # fmt: skip
         # Pliegues concatenados (como cross_val_predict): accuracy y cobertura coinciden con la
@@ -260,23 +272,25 @@ def costs(df: pd.DataFrame, models: dict, single: int = 30,
     df = df.dropna(subset=["category"]).reset_index(drop=True)
     df["category"] = collapse_rare(df["category"])
     tr, te = temporal_split(df)
-    if max_batch:
-        te = te.iloc[:max_batch]
     rows = []
     for name, cls in models.items():
+        _log(f"coste [{embeddings.device()}]: {name}")
+        m = cls()
+        n = SLOW_COST_ROWS if max_batch and getattr(m, "slow", False) else max_batch
+        te_m = te.iloc[:n] if n else te
         with embeddings.no_cache():
-            m = cls()
             t0 = time.perf_counter()
             m.fit(tr, tr["category"])
             fit_s = time.perf_counter() - t0
-            m.predict_proba(te.iloc[:1])  # calentamiento (carga del codificador, CUDA)
+            # Calentamiento: carga del codificador o del LLM, inicialización de CUDA.
+            m.predict_proba(te_m.iloc[:1])
             t0 = time.perf_counter()
-            m.predict_proba(te)
-            batch_ms = (time.perf_counter() - t0) * 1000 / len(te)
+            m.predict_proba(te_m)
+            batch_ms = (time.perf_counter() - t0) * 1000 / len(te_m)
             lat = []
-            for i in range(min(single, len(te))):
+            for i in range(min(single, len(te_m))):
                 t0 = time.perf_counter()
-                m.predict_proba(te.iloc[[i]])
+                m.predict_proba(te_m.iloc[[i]])
                 lat.append((time.perf_counter() - t0) * 1000)
         size = len(pickle.dumps(m))
         if hasattr(m, "frozen_bytes"):  # pesos congelados del codificador o del LLM
@@ -419,7 +433,8 @@ def main(argv: list[str] | None = None) -> int:
     if use_emb and dev != "cpu" and not args.no_cpu_cost:
         with embeddings.use_device("cpu"):
             cpu_rows = costs(df, cost_models, max_batch=CPU_COST_ROWS)
-        label = f"cpu, {embeddings.TORCH_THREADS} hilo(s), lote de {CPU_COST_ROWS} movimientos"
+        label = (f"cpu, {embeddings.TORCH_THREADS} hilo(s), lote de {CPU_COST_ROWS} movimientos "
+                 f"({SLOW_COST_ROWS} para el LLM)")  # fmt: skip
         cost_tables.append((label, cpu_rows))
     text = report(scores, title, df.dropna(subset=["category"]), cost_tables)
     out.parent.mkdir(parents=True, exist_ok=True)

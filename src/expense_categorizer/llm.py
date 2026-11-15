@@ -97,6 +97,8 @@ def _score_labels(name: str, prompt: str, labels: list[str]) -> np.ndarray:
 
 
 class ZeroShotLLM(_Base):
+    slow = True  # en CPU, `evaluate.costs` mide pocas filas: va movimiento a movimiento
+
     def __init__(self, model_name: str = QWEN):
         self.model_name = model_name
 

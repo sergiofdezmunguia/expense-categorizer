@@ -11,6 +11,9 @@
   multilingüe (`embeddings.py`) en vez de TF-IDF, o como ambos concatenados.
 - `ZeroShotEmbedding` (v2): referencia sin entrenar el clasificador: similitud coseno entre el
   concepto y el nombre de cada categoría.
+- `TunedC` (v2): envuelve cualquiera de los anteriores con logística y elige su C por validación
+  interna agrupada por comercio.
+- `llm.ZeroShotLLM` (v2, opcional): LLM local que puntúa el nombre de cada categoría.
 """
 
 from __future__ import annotations
