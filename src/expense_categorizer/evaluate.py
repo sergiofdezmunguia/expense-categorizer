@@ -16,20 +16,45 @@ revisión. El umbral se elige con validación cruzada dentro del entrenamiento.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+import pickle
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import f1_score
 from sklearn.model_selection import GroupKFold, KFold
 
-from expense_categorizer.models import MODELS
+from expense_categorizer import embeddings
+from expense_categorizer.models import (
+    BASELINE,
+    MODELS,
+    embedding_models,
+    fixed_c_embedding_models,
+    llm_models,
+)
 from expense_categorizer.text import merchant_key
 
 TARGET_PRECISION = 0.90
 MIN_PER_CLASS = 5
+
+
+@dataclass
+class Preds:
+    """Predicciones fila a fila en la prueba; permiten agregar pliegues y hacer bootstrap."""
+
+    y_true: np.ndarray
+    pred: np.ndarray
+    conf: np.ndarray
+    covered: np.ndarray
+    groups: np.ndarray  # clave de comercio: unidad del bootstrap
+
+    @staticmethod
+    def concat(parts: list[Preds]) -> Preds:
+        return Preds(*(np.concatenate([getattr(p, f) for p in parts]) for f in
+                       ("y_true", "pred", "conf", "covered", "groups")))  # fmt: skip
 
 
 @dataclass
@@ -41,6 +66,9 @@ class Score:
     macro_f1: float
     coverage_at_target: float
     precision_covered: float
+    preds: Preds | None = field(default=None, repr=False, compare=False)
+    ci: dict = field(default_factory=dict, repr=False, compare=False)
+    vs_baseline: tuple | None = field(default=None, repr=False, compare=False)
 
 
 def collapse_rare(
@@ -85,40 +113,106 @@ def _inner_threshold(
     return pick_threshold(conf, correct)
 
 
-def score(name: str, model, X_tr, y_tr, X_te, y_te, split: str) -> Score:
+def metrics(name: str, split: str, p: Preds) -> Score:
+    hit = p.pred == p.y_true
+    return Score(
+        model=name,
+        split=split,
+        n_test=len(hit),
+        accuracy=float(hit.mean()),
+        macro_f1=f1_score(
+            p.y_true,
+            p.pred,
+            average="macro",
+            labels=np.unique(p.y_true),
+            zero_division=0,
+        ),
+        coverage_at_target=float(p.covered.mean()),
+        precision_covered=float(hit[p.covered].mean())
+        if p.covered.any()
+        else float("nan"),
+        preds=p,
+    )
+
+
+def predict_split(model, X_tr, y_tr, X_te, y_te, split: str) -> Preds:
     groups = (
         X_tr["description"].map(merchant_key) if split.startswith("comercios") else None
     )
     threshold = _inner_threshold(model, X_tr, y_tr, groups)
     m = clone(model).fit(X_tr, y_tr)
     p = m.predict_proba(X_te)
-    pred = m.classes_[p.argmax(axis=1)]
-    covered = p.max(axis=1) >= threshold
-    y_true = y_te.to_numpy()
-    return Score(
-        model=name,
-        split=split,
-        n_test=len(y_te),
-        accuracy=accuracy_score(y_true, pred),
-        macro_f1=f1_score(
-            y_true, pred, average="macro", labels=np.unique(y_true), zero_division=0
-        ),
-        coverage_at_target=float(covered.mean()),
-        precision_covered=float((pred[covered] == y_true[covered]).mean())
-        if covered.any()
-        else float("nan"),
+    conf = p.max(axis=1)
+    return Preds(
+        y_true=y_te.to_numpy(),
+        pred=m.classes_[p.argmax(axis=1)],
+        conf=conf,
+        covered=conf >= threshold,
+        groups=X_te["description"].map(merchant_key).to_numpy(),
     )
 
 
-def _pool(name: str, parts: list[Score]) -> Score:
-    """Agrega los pliegues ponderando por movimientos; la precisión cubierta, por cubiertos."""
-    n = sum(p.n_test for p in parts)
-    avg = lambda f: sum(getattr(p, f) * p.n_test for p in parts) / n
-    covered = [(p.coverage_at_target * p.n_test, p.precision_covered) for p in parts]
-    total = sum(c for c, _ in covered)
-    precision = sum(c * pr for c, pr in covered if c) / total if total else float("nan")
-    return Score(name, "comercios nuevos", n, avg("accuracy"), avg("macro_f1"),
-                 avg("coverage_at_target"), precision)  # fmt: skip
+def score(name: str, model, X_tr, y_tr, X_te, y_te, split: str) -> Score:
+    return metrics(name, split, predict_split(model, X_tr, y_tr, X_te, y_te, split))
+
+
+def _cluster_resamples(groups: np.ndarray, n: int, seed: int = 0):
+    """Bootstrap por comercio: los movimientos de un mismo comercio no son independientes, así
+    que se remuestrean comercios enteros. Da intervalos más anchos (y más honestos)."""
+    rng = np.random.default_rng(seed)
+    codes, uniq = pd.factorize(groups)
+    rows = [np.where(codes == g)[0] for g in range(len(uniq))]
+    for _ in range(n):
+        pick = rng.integers(len(rows), size=len(rows))
+        yield np.concatenate([rows[g] for g in pick])
+
+
+def bootstrap(p: Preds, n: int = 1000, seed: int = 0) -> dict:
+    """IC 95 % (percentiles) de accuracy, cobertura y precisión cubierta. El umbral queda fijo:
+    se remuestrea la prueba, no se vuelve a elegir nada."""
+    hit = p.pred == p.y_true
+    acc, cov, prec = [], [], []
+    for idx in _cluster_resamples(p.groups, n, seed):
+        acc.append(hit[idx].mean())
+        c = p.covered[idx]
+        cov.append(c.mean())
+        if c.any():
+            prec.append(hit[idx][c].mean())
+    q = lambda v: (
+        (float(np.percentile(v, 2.5)), float(np.percentile(v, 97.5))) if v else None
+    )
+    return {"accuracy": q(acc), "coverage": q(cov), "precision_covered": q(prec)}
+
+
+def paired_diff(p: Preds, base: Preds, n: int = 1000, seed: int = 0) -> tuple:
+    """Diferencia de accuracy frente a la referencia sobre los mismos remuestreos (mismas filas,
+    mismo orden): (diferencia, IC 2,5 %, IC 97,5 %)."""
+    assert np.array_equal(p.y_true, base.y_true) and np.array_equal(
+        p.groups, base.groups
+    )
+    d = (p.pred == p.y_true).astype(float) - (base.pred == base.y_true)
+    boots = [d[idx].mean() for idx in _cluster_resamples(p.groups, n, seed)]
+    return (
+        float(d.mean()),
+        float(np.percentile(boots, 2.5)),
+        float(np.percentile(boots, 97.5)),
+    )
+
+
+RC_LEVELS = (0.25, 0.5, 0.75)
+
+
+def risk_coverage(p: Preds) -> dict:
+    """Curva riesgo-cobertura descriptiva: precisión si se cubre el x % más seguro, y AURC (error
+    medio a lo largo de toda la curva; menor es mejor). No elige ningún umbral: solo describe cómo
+    ordena la confianza de cada modelo."""
+    hit = (p.pred == p.y_true)[np.argsort(-p.conf, kind="stable")]
+    prec = np.cumsum(hit) / np.arange(1, len(hit) + 1)
+    out = {
+        lvl: float(prec[max(0, int(np.ceil(lvl * len(hit))) - 1)]) for lvl in RC_LEVELS
+    }
+    out["aurc"] = float((1 - prec).mean())
+    return out
 
 
 def temporal_split(df: pd.DataFrame, test_frac: float = 0.2):
@@ -127,29 +221,75 @@ def temporal_split(df: pd.DataFrame, test_frac: float = 0.2):
     return df[df["booking_date"] < cut], df[df["booking_date"] >= cut]
 
 
-def run(df: pd.DataFrame, folds: int = 5) -> list[Score]:
+def run(df: pd.DataFrame, folds: int = 5, models: dict | None = None,
+        n_boot: int = 0) -> list[Score]:  # fmt: skip
+    models = MODELS if models is None else models
     df = df.dropna(subset=["category"]).reset_index(drop=True)
     df["category"] = collapse_rare(df["category"])
     out: list[Score] = []
     tr, te = temporal_split(df)
-    for name, cls in MODELS.items():
+    for name, cls in models.items():
         out.append(
             score(name, cls(), tr, tr["category"], te, te["category"], "temporal")
         )
     groups = df["description"].map(merchant_key)
-    for name, cls in MODELS.items():
-        parts = []
-        for i, (a, b) in enumerate(
-            GroupKFold(n_splits=folds).split(df, df["category"], groups)
-        ):
-            parts.append(score(name, cls(), df.iloc[a], df["category"].iloc[a], df.iloc[b],
-                               df["category"].iloc[b], f"comercios nuevos #{i}"))  # fmt: skip
-        out.append(_pool(name, parts))
+    splits = list(GroupKFold(n_splits=folds).split(df, df["category"], groups))
+    for name, cls in models.items():
+        parts = [predict_split(cls(), df.iloc[a], df["category"].iloc[a], df.iloc[b],
+                               df["category"].iloc[b], "comercios nuevos") for a, b in splits]  # fmt: skip
+        # Pliegues concatenados (como cross_val_predict): accuracy y cobertura coinciden con la
+        # media ponderada; el F1 macro se calcula sobre todas las predicciones juntas.
+        out.append(metrics(name, "comercios nuevos", Preds.concat(parts)))
+    if n_boot:
+        base = {s.split: s for s in out if s.model == BASELINE}
+        for s in out:
+            s.ci = bootstrap(s.preds, n_boot)
+            if s.split in base and s.model != BASELINE:
+                s.vs_baseline = paired_diff(s.preds, base[s.split].preds, n_boot)
     return out
 
 
-def report(scores: list[Score], title: str, df: pd.DataFrame) -> str:
-    rows = [s for s in scores if "#" not in s.split]
+def costs(df: pd.DataFrame, models: dict, single: int = 30) -> list[dict]:
+    """Coste de cada modelo en la división temporal, **sin caché de embeddings** (si no, la
+    latencia sería falsa): tiempo de ajuste, ms por movimiento en lote, ms de un movimiento
+    suelto (mediana) y tamaño (modelo serializado + pesos del codificador congelado)."""
+    df = df.dropna(subset=["category"]).reset_index(drop=True)
+    df["category"] = collapse_rare(df["category"])
+    tr, te = temporal_split(df)
+    rows = []
+    for name, cls in models.items():
+        with embeddings.no_cache():
+            m = cls()
+            t0 = time.perf_counter()
+            m.fit(tr, tr["category"])
+            fit_s = time.perf_counter() - t0
+            m.predict_proba(te.iloc[:1])  # calentamiento (carga del codificador, CUDA)
+            t0 = time.perf_counter()
+            m.predict_proba(te)
+            batch_ms = (time.perf_counter() - t0) * 1000 / len(te)
+            lat = []
+            for i in range(min(single, len(te))):
+                t0 = time.perf_counter()
+                m.predict_proba(te.iloc[[i]])
+                lat.append((time.perf_counter() - t0) * 1000)
+        size = len(pickle.dumps(m))
+        if hasattr(m, "frozen_bytes"):  # pesos congelados del codificador o del LLM
+            size += m.frozen_bytes()
+        rows.append({"model": name, "fit_s": fit_s, "batch_ms": batch_ms,
+                     "single_ms": float(np.median(lat)), "size_mb": size / 1e6})  # fmt: skip
+    return rows
+
+
+def _pct(x) -> str:
+    return "—" if x is None or np.isnan(x) else f"{x:.0%}"
+
+
+def _ci(ci) -> str:
+    return "—" if not ci else f"{ci[0]:.0%}–{ci[1]:.0%}"
+
+
+def report(scores: list[Score], title: str, df: pd.DataFrame,
+           cost_rows: list[dict] | None = None, device: str | None = None) -> str:  # fmt: skip
     lines = [
         f"# {title}",
         "",
@@ -166,14 +306,57 @@ def report(scores: list[Score], title: str, df: pd.DataFrame) -> str:
         "| División | Modelo | Accuracy | F1 macro | Cobertura | Precisión cubierta |",
         "|---|---|---|---|---|---|",
     ]
-    for s in rows:
-        pc = (
-            "—"
-            if s.precision_covered != s.precision_covered
-            else f"{s.precision_covered:.0%}"
-        )
+    for s in scores:
         lines.append(f"| {s.split} | {s.model} | {s.accuracy:.0%} | {s.macro_f1:.2f} | "
-                     f"{s.coverage_at_target:.0%} | {pc} |")  # fmt: skip
+                     f"{s.coverage_at_target:.0%} | {_pct(s.precision_covered)} |")  # fmt: skip
+    if any(s.ci for s in scores):
+        lines += [
+            "",
+            "## Intervalos de confianza (bootstrap por comercio, 95 %)",
+            "",
+            (
+                "Se remuestrean comercios enteros de la prueba; el umbral no se toca. «Δ vs TF-IDF» "
+                "es la diferencia de accuracy frente a TF-IDF + logística en los mismos remuestreos: si "
+                "su intervalo incluye el 0, la diferencia no es concluyente."
+            ),
+            "",
+            "| División | Modelo | Accuracy | Cobertura | Precisión cubierta | Δ vs TF-IDF |",
+            "|---|---|---|---|---|---|",
+        ]
+        for s in scores:
+            d = s.vs_baseline
+            delta = "—" if d is None else f"{d[0]:+.1%} ({d[1]:+.1%} a {d[2]:+.1%})"
+            lines.append(f"| {s.split} | {s.model} | {_ci(s.ci['accuracy'])} | "
+                         f"{_ci(s.ci['coverage'])} | {_ci(s.ci['precision_covered'])} | {delta} |")  # fmt: skip
+    lines += [
+        "",
+        "## Curva riesgo-cobertura",
+        "",
+        (
+            "Precisión si se categoriza solo el x % de movimientos en que el modelo está más seguro "
+            "(descriptivo, sin umbral). AURC = error medio a lo largo de la curva; menor es mejor."
+        ),
+        "",
+        "| División | Modelo | "
+        + " | ".join(f"{lvl:.0%}" for lvl in RC_LEVELS)
+        + " | AURC |",
+        "|---|---|" + "---|" * (len(RC_LEVELS) + 1),
+    ]
+    for s in scores:
+        rc = risk_coverage(s.preds)
+        cells = " | ".join(f"{rc[lvl]:.0%}" for lvl in RC_LEVELS)
+        lines.append(f"| {s.split} | {s.model} | {cells} | {rc['aurc']:.3f} |")
+    if cost_rows:
+        lines += [
+            "",
+            f"## Coste (división temporal, sin caché, dispositivo: {device or 'cpu'})",
+            "",
+            "| Modelo | Ajuste (s) | ms/movimiento en lote | ms de un movimiento suelto | Tamaño (MB) |",
+            "|---|---|---|---|---|",
+        ]
+        for r in cost_rows:
+            lines.append(f"| {r['model']} | {r['fit_s']:.1f} | {r['batch_ms']:.2f} | "
+                         f"{r['single_ms']:.1f} | {r['size_mb']:.1f} |")  # fmt: skip
     return "\n".join(lines) + "\n"
 
 
@@ -183,6 +366,17 @@ def main(argv: list[str] | None = None) -> int:
         "--source", choices=["synthetic", "personal-os"], default="synthetic"
     )
     ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--no-embeddings", action="store_true",
+                    help="solo los modelos v1 (sin descargar codificadores)")  # fmt: skip
+    ap.add_argument(
+        "--fixed-c", action="store_true", help="añade el primer intento v2 (C=10)"
+    )
+    ap.add_argument(
+        "--llm", action="store_true", help="añade el LLM local zero-shot (lento)"
+    )
+    ap.add_argument(
+        "--bootstrap", type=int, default=1000, help="remuestreos; 0 = sin IC"
+    )
     args = ap.parse_args(argv)
     if args.source == "synthetic":
         from expense_categorizer.synthetic import generate
@@ -201,11 +395,25 @@ def main(argv: list[str] | None = None) -> int:
             Path("results/real/report.md"),
         )
     out = args.out or out
-    scores = run(df)
-    text = report(scores, title, df.dropna(subset=["category"]))
+    models = dict(MODELS)
+    use_emb = not args.no_embeddings and embeddings.available()
+    if use_emb:
+        models |= embedding_models()
+    if use_emb and args.fixed_c:
+        models |= fixed_c_embedding_models()
+    if use_emb and args.llm:
+        models |= llm_models()
+    scores = run(df, models=models, n_boot=args.bootstrap)
+    cost_models = {k: v for k, v in models.items() if k != "mayoritaria"}
+    cost_rows = costs(df, cost_models)
+    text = report(scores, title, df.dropna(subset=["category"]), cost_rows,
+                  embeddings.device() if use_emb else "cpu")  # fmt: skip
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
-    print(text)
+    if args.source == "synthetic":
+        print(text)
+    else:
+        print(f"Informe (solo métricas agregadas) en {out}")
     return 0
 
 

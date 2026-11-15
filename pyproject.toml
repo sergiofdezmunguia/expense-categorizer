@@ -14,6 +14,12 @@ dependencies = [
     "threadpoolctl>=3.8.0",
 ]
 
+[project.optional-dependencies]
+embeddings = [
+    "sentence-transformers>=3",
+    "torch>=2.4,<2.15",
+]
+
 [build-system]
 requires = ["uv_build>=0.12.23,<0.13.0"]
 build-backend = "uv_build"
@@ -23,3 +29,13 @@ dev = [
     "pytest>=9.2.0",
     "ruff>=0.17.5",
 ]
+
+# Ruedas de torch para CUDA 12.6: el driver de WSL de este PC es CUDA 12.7 y las ruedas por
+# defecto de PyPI (CUDA 13) no ven la GPU.
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
