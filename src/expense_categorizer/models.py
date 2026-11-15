@@ -7,16 +7,24 @@
   tipo de cuenta, con regresión logística. Puede generalizar a comercios nuevos («farmacia
   lopez» se parece a «farmacia garcia»).
 - `Hybrid`: memoria si el comercio es conocido; si no, el modelo de texto.
+- `EmbeddingModel` (v2): lo mismo que `TextModel`, pero el texto entra como embedding de frase
+  multilingüe (`embeddings.py`) en vez de TF-IDF, o como ambos concatenados.
+- `ZeroShotEmbedding` (v2): referencia sin entrenar el clasificador: similitud coseno entre el
+  concepto y el nombre de cada categoría.
+- `TunedC` (v2): envuelve cualquiera de los anteriores con logística y elige su C por validación
+  interna agrupada por comercio.
+- `llm.ZeroShotLLM` (v2, opcional): LLM local que puntúa el nombre de cada categoría.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.base import BaseEstimator, ClassifierMixin, clone
 from sklearn.compose import ColumnTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import FeatureUnion, Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 from threadpoolctl import threadpool_limits
@@ -96,8 +104,8 @@ class MerchantMemory(_Base):
         return out
 
 
-def _text_pipeline(C: float) -> Pipeline:
-    text = FeatureUnion(
+def _tfidf() -> FeatureUnion:
+    return FeatureUnion(
         [
             (
                 "chars",
@@ -113,9 +121,21 @@ def _text_pipeline(C: float) -> Pipeline:
             ),
         ]
     )
+
+
+def _text_pipeline(C: float, text="tfidf", embedder: str | None = None) -> Pipeline:
+    if text == "tfidf":
+        text_features = _tfidf()
+    else:
+        from expense_categorizer.embeddings import SentenceEmbedder
+
+        emb = SentenceEmbedder(embedder)
+        text_features = (
+            emb if text == "emb" else FeatureUnion([("tfidf", _tfidf()), ("emb", emb)])
+        )
     features = ColumnTransformer(
         [
-            ("text", text, "text"),
+            ("text", text_features, "text"),
             ("num", FunctionTransformer(), ["is_income", "log_amount"]),
             (
                 "cat",
@@ -149,6 +169,98 @@ class TextModel(_Base):
             return self.pipe_.predict_proba(prepare(df))
 
 
+class EmbeddingModel(TextModel):
+    """`text="emb"`: embedding + importe/signo/día/cuenta. `text="tfidf+emb"`: ambos bloques de
+    texto concatenados (los dos con norma 1 por fila, así pesan parecido)."""
+
+    def __init__(
+        self, C: float = 10.0, model_name: str | None = None, text: str = "emb"
+    ):
+        self.C = C
+        self.model_name = model_name
+        self.text = text
+
+    def fit(self, df, y):
+        from expense_categorizer.embeddings import E5_SMALL
+
+        with threadpool_limits(1):
+            pipe = _text_pipeline(self.C, self.text, self.model_name or E5_SMALL)
+            self.pipe_ = pipe.fit(prepare(df), np.asarray(y))
+        self.classes_ = self.pipe_.classes_
+        return self
+
+    def frozen_bytes(self) -> int:
+        from expense_categorizer.embeddings import E5_SMALL, encoder_bytes
+
+        return encoder_bytes(self.model_name or E5_SMALL)
+
+
+class ZeroShotEmbedding(_Base):
+    """Sin aprender de los ejemplos: cada movimiento va a la categoría cuyo nombre («farmacia»,
+    «comida a domicilio») tiene el embedding más parecido. Solo usa del entrenamiento la lista de
+    categorías. Las probabilidades son un softmax de las similitudes con temperatura fija."""
+
+    def __init__(self, model_name: str | None = None, temperature: float = 0.02):
+        self.model_name = model_name
+        self.temperature = temperature
+
+    def fit(self, df, y):
+        self.classes_ = np.array(sorted(pd.Series(y).unique()))
+        return self
+
+    def frozen_bytes(self) -> int:
+        from expense_categorizer.embeddings import E5_SMALL, encoder_bytes
+
+        return encoder_bytes(self.model_name or E5_SMALL)
+
+    def predict_proba(self, df):
+        from expense_categorizer.embeddings import E5_SMALL, encode
+
+        name = self.model_name or E5_SMALL
+        labels = [c.replace("-", " ") for c in self.classes_]
+        sims = encode(name, prepare(df)["text"]) @ encode(name, labels).T
+        z = np.exp((sims - sims.max(axis=1, keepdims=True)) / self.temperature)
+        return z / z.sum(axis=1, keepdims=True)
+
+
+class TunedC(_Base):
+    """Elige la regularización C de `base` con validación cruzada **dentro del entrenamiento**,
+    agrupada por comercio (lo que se quiere es generalizar a comercios nuevos), y reajusta con
+    todo el entrenamiento. Con C fijo a 10, los embeddings infraajustaban (90 % de aciertos en
+    el propio entrenamiento real, frente al 100 % de TF-IDF): su escala es muy distinta."""
+
+    def __init__(self, base=None, grid=(1.0, 10.0, 100.0, 1000.0), folds: int = 3):
+        self.base = base
+        self.grid = grid
+        self.folds = folds
+
+    def fit(self, df, y):
+        base = self.base if self.base is not None else TextModel()
+        y = np.asarray(y)
+        groups = df["description"].map(merchant_key)
+        self.C_ = base.C
+        if groups.nunique() >= self.folds:
+            splits = list(GroupKFold(n_splits=self.folds).split(df, y, groups))
+            acc = []
+            for c in self.grid:
+                hits = 0
+                for tr, va in splits:
+                    m = clone(base).set_params(C=c).fit(df.iloc[tr], y[tr])
+                    hits += (m.predict(df.iloc[va]) == y[va]).sum()
+                acc.append(hits / len(y))
+            self.C_ = self.grid[int(np.argmax(acc))]  # empate → la C más pequeña
+        self.model_ = clone(base).set_params(C=self.C_).fit(df, y)
+        self.classes_ = self.model_.classes_
+        return self
+
+    def predict_proba(self, df):
+        return self.model_.predict_proba(df)
+
+    def frozen_bytes(self) -> int:
+        m = self.model_
+        return m.frozen_bytes() if hasattr(m, "frozen_bytes") else 0
+
+
 class Hybrid(_Base):
     def __init__(self, C: float = 10.0):
         self.C = C
@@ -179,3 +291,43 @@ MODELS = {
     "texto (TF-IDF + logística)": TextModel,
     "híbrido (memoria + texto)": Hybrid,
 }
+BASELINE = "texto (TF-IDF + logística)"
+
+
+def embedding_models() -> dict:
+    """Modelos v2, declarados antes de ver resultados: dos codificadores de ~118 M parámetros y
+    la combinación con TF-IDF solo con e5 (elegido a priori, no por su resultado). Todos con C
+    elegido por validación interna (`TunedC`), y TF-IDF igual, como control justo."""
+    from expense_categorizer.embeddings import E5_SMALL, MINILM
+
+    def tuned(**kw):
+        return lambda: TunedC(EmbeddingModel(**kw))
+
+    return {
+        "zero-shot (similitud e5 con el nombre)": lambda: ZeroShotEmbedding(E5_SMALL),
+        "TF-IDF + logística, C interno": lambda: TunedC(TextModel()),
+        "e5-small + logística, C interno": tuned(model_name=E5_SMALL),
+        "MiniLM-L12 + logística, C interno": tuned(model_name=MINILM),
+        "TF-IDF + e5-small + logística, C interno": tuned(
+            model_name=E5_SMALL, text="tfidf+emb"
+        ),
+    }
+
+
+def fixed_c_embedding_models() -> dict:
+    """Primer intento v2 (C = 10 fijo, como TF-IDF). Se conserva para reproducir el informe."""
+    from expense_categorizer.embeddings import E5_SMALL, MINILM
+
+    return {
+        "e5-small + logística, C=10": lambda: EmbeddingModel(model_name=E5_SMALL),
+        "MiniLM-L12 + logística, C=10": lambda: EmbeddingModel(model_name=MINILM),
+        "TF-IDF + e5-small + logística, C=10": lambda: EmbeddingModel(
+            model_name=E5_SMALL, text="tfidf+emb"
+        ),
+    }
+
+
+def llm_models() -> dict:
+    from expense_categorizer.llm import QWEN, ZeroShotLLM
+
+    return {"LLM zero-shot (Qwen2.5-1.5B)": lambda: ZeroShotLLM(QWEN)}
