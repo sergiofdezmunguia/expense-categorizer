@@ -103,15 +103,32 @@ Precisión si se categoriza solo el x % de movimientos en que el modelo está m�
 
 | Modelo | Ajuste (s) | ms/movimiento en lote | ms de un movimiento suelto | Tamaño (MB) |
 |---|---|---|---|---|
-| memoria de comercios (≈ reglas) | 0.2 | 0.02 | 1.3 | 0.0 |
-| texto (TF-IDF + logística) | 0.5 | 0.06 | 6.6 | 0.3 |
-| híbrido (memoria + texto) | 0.6 | 0.09 | 8.7 | 0.3 |
-| zero-shot (similitud e5 con el nombre) | 0.0 | 0.58 | 22.3 | 470.6 |
-| TF-IDF + logística, C interno | 5.0 | 0.05 | 7.1 | 0.3 |
-| e5-small + logística, C interno | 9.5 | 0.22 | 15.2 | 470.7 |
-| MiniLM-L12 + logística, C interno | 8.7 | 0.21 | 16.4 | 470.7 |
-| TF-IDF + e5-small + logística, C interno | 14.9 | 0.24 | 15.9 | 471.0 |
-| e5-small + logística, C=10 | 0.8 | 0.24 | 13.5 | 470.7 |
-| MiniLM-L12 + logística, C=10 | 0.8 | 0.22 | 13.4 | 470.7 |
-| TF-IDF + e5-small + logística, C=10 | 1.4 | 0.25 | 16.1 | 471.0 |
-| LLM zero-shot (Qwen2.5-1.5B) | 0.0 | 64.34 | 65.5 | 3087.4 |
+| memoria de comercios (≈ reglas) | 0.2 | 0.02 | 1.4 | 0.0 |
+| texto (TF-IDF + logística) | 0.5 | 0.05 | 6.0 | 0.3 |
+| híbrido (memoria + texto) | 0.6 | 0.08 | 8.8 | 0.3 |
+| zero-shot (similitud e5 con el nombre) | 0.0 | 0.79 | 21.1 | 470.6 |
+| TF-IDF + logística, C interno | 4.9 | 0.05 | 6.5 | 0.3 |
+| e5-small + logística, C interno | 9.2 | 0.18 | 13.3 | 470.7 |
+| MiniLM-L12 + logística, C interno | 8.4 | 0.18 | 13.3 | 470.7 |
+| TF-IDF + e5-small + logística, C interno | 14.8 | 0.23 | 19.5 | 471.0 |
+| e5-small + logística, C=10 | 0.9 | 0.19 | 15.0 | 470.7 |
+| MiniLM-L12 + logística, C=10 | 0.7 | 0.20 | 15.3 | 470.7 |
+| TF-IDF + e5-small + logística, C=10 | 1.4 | 0.22 | 18.6 | 471.0 |
+| LLM zero-shot (Qwen2.5-1.5B) | 0.0 | 63.93 | 65.9 | 3087.4 |
+
+## Coste (división temporal, sin caché, dispositivo: cpu, 1 hilo(s), lote de 100 movimientos (10 para el LLM))
+
+| Modelo | Ajuste (s) | ms/movimiento en lote | ms de un movimiento suelto | Tamaño (MB) |
+|---|---|---|---|---|
+| memoria de comercios (≈ reglas) | 0.2 | 0.03 | 1.3 | 0.0 |
+| texto (TF-IDF + logística) | 0.5 | 0.11 | 6.3 | 0.3 |
+| híbrido (memoria + texto) | 0.6 | 0.16 | 8.6 | 0.3 |
+| zero-shot (similitud e5 con el nombre) | 0.0 | 6.42 | 72.9 | 470.6 |
+| TF-IDF + logística, C interno | 4.8 | 0.11 | 6.4 | 0.3 |
+| e5-small + logística, C interno | 81.9 | 5.79 | 23.5 | 470.7 |
+| MiniLM-L12 + logística, C interno | 65.2 | 4.75 | 22.6 | 470.7 |
+| TF-IDF + e5-small + logística, C interno | 87.4 | 5.84 | 26.2 | 471.0 |
+| e5-small + logística, C=10 | 6.3 | 5.77 | 23.7 | 470.7 |
+| MiniLM-L12 + logística, C=10 | 4.9 | 4.85 | 22.0 | 470.7 |
+| TF-IDF + e5-small + logística, C=10 | 7.0 | 5.97 | 26.5 | 471.0 |
+| LLM zero-shot (Qwen2.5-1.5B) | 0.0 | 6415.48 | 6482.9 | 6174.9 |
